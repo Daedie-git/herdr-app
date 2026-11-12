@@ -72,10 +72,9 @@ pub struct WordMove {
 }
 
 fn word_move(keys: &str, action: &str) -> Option<WordMove> {
-    let key = keys.split_whitespace().last()?;
-    let key = key.rsplit_once('-').map_or(key, |(_, k)| k);
+    let key = gpui::Keystroke::parse(keys.split_whitespace().last()?).ok()?.key;
     let text = action.strip_prefix("send:")?;
-    matches!((text, key), ("\x1bb", "left") | ("\x1bf", "right")).then(|| WordMove { text: text.to_owned() })
+    matches!((text, key.as_str()), ("\x1bb", "left") | ("\x1bf", "right")).then(|| WordMove { text: text.to_owned() })
 }
 
 impl CommandBinding {
@@ -296,7 +295,7 @@ pub fn install(bindings: Vec<KeyBinding>, cx: &mut App) {
 mod tests {
     #[test]
     fn only_readline_word_moves_on_arrows_become_word_moves() {
-        let text = r#"{"terminal":{"ctrl-left":"send:\u001bb","alt-right":"send:\u001bf","f2 left":"send:\u001bb","f2":"send:\u001bb","left":"send:\u001bf","ctrl-backspace":"send:\u0017"}}"#;
+        let text = r#"{"terminal":{"ctrl-left":"send:\u001bb","alt-right":"send:\u001bf","f2 left":"send:\u001bb","ALT-LEFT":"send:\u001bb","f2":"send:\u001bb","left":"send:\u001bf","ctrl-backspace":"send:\u0017"}}"#;
         let mut words: Vec<(String, String)> = super::parse(text).unwrap().iter()
             .filter_map(|b| {
                 let word = b.action().as_any().downcast_ref::<super::WordMove>()?;
@@ -304,7 +303,7 @@ mod tests {
             })
             .collect();
         words.sort();
-        assert_eq!(words, [("alt-right".into(), "\x1bf".into()), ("ctrl-left".into(), "\x1bb".into()), ("f2 left".into(), "\x1bb".into())]);
+        assert_eq!(words, [("alt-left".into(), "\x1bb".into()), ("alt-right".into(), "\x1bf".into()), ("ctrl-left".into(), "\x1bb".into()), ("f2 left".into(), "\x1bb".into())]);
     }
 
     #[test]
