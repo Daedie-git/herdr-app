@@ -1555,31 +1555,42 @@ impl AppWindow {
     }
 
     /// Agents whose terminal was lost and came back as a shell: their resume
-    /// command, typed at most once (agent_resume.rs). The label goes first:
-    /// a resume lost to a crash in between beats one typed twice.
+    /// command, typed at most once (agent_resume.rs). The label is claimed
+    /// and cleared first: a resume lost to a crash in between beats one typed twice.
     fn resume_agents(&mut self, cx: &mut Context<Self>) {
-        self.resuming.retain(|(addr, label)| {
-            self.live.get(addr).and_then(|r| r.pointer(&format!("/labels/{}", crate::agent_resume::LABEL))).and_then(Value::as_str) == Some(label)
-        });
+        use crate::agent_resume::{LABEL, claim, due, holds};
+        let label_of = |r: &Value| r.pointer(&format!("/labels/{LABEL}")).and_then(Value::as_str).map(str::to_owned);
+        self.resuming.retain(|(addr, label)| self.live.get(addr).and_then(label_of).as_ref() == Some(label));
         for (addr, rec) in &self.live {
-            let Some((label, line)) = crate::agent_resume::due(rec) else { continue };
+            let (Some(line), Some(label)) = (due(rec), label_of(rec)) else { continue };
             if !self.resuming.insert((addr.clone(), label.clone())) {
                 continue;
             }
-            tracing::info!("resuming {addr}: {line}");
-            let (core, addr) = (self.core.clone(), addr.clone());
+            let (core, addr, mine) = (self.core.clone(), addr.clone(), claim());
             cx.spawn(async move |this, cx| {
-                let to = addr.clone();
-                let cleared = cx.background_executor().spawn(async move {
-                    core.call("terminal.label", json!({ "terminal": to, "labels": { crate::agent_resume::LABEL: "" } }))?;
-                    // An error here may still deliver later: never retried.
-                    let sent = core.call_timeout("terminal.send", json!({ "terminal": to, "text": line }), Duration::from_secs(90));
-                    if let Err(e) = sent {
-                        tracing::warn!("resume of {to} may not have been typed: {e:#}");
+                let set = |v: &str| json!({ "terminal": addr, "labels": { LABEL: v } });
+                let bg = cx.background_executor().clone();
+                let (c, claimed) = (core.clone(), set(&mine));
+                let result = async {
+                    bg.spawn(async move { c.call("terminal.label", claimed) }).await?;
+                    bg.timer(Duration::from_secs(1)).await;
+                    let (c, get, clear) = (core.clone(), json!({ "terminal": addr }), set(""));
+                    let rec = bg.spawn(async move { c.call("terminal.get", get) }).await?;
+                    if !holds(&rec, &mine) {
+                        return anyhow::Ok(());
                     }
-                    anyhow::Ok(())
-                }).await;
-                let Err(e) = cleared else { return };
+                    tracing::info!("resuming {addr}: {line}");
+                    let (c, send) = (core.clone(), json!({ "terminal": addr, "text": line }));
+                    bg.spawn(async move {
+                        c.call("terminal.label", clear)?;
+                        // An error here may still deliver later: never retried.
+                        if let Err(e) = c.call_timeout("terminal.send", send, Duration::from_secs(90)) {
+                            tracing::warn!("a resume may not have been typed: {e:#}");
+                        }
+                        anyhow::Ok(())
+                    }).await
+                }.await;
+                let Err(e) = result else { return };
                 tracing::warn!("cannot resume {addr}: {e:#}");
                 let _ = this.update(cx, |this, _| this.resuming.remove(&(addr, label)));
             })

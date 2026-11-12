@@ -123,20 +123,34 @@ fn pi(dir: &Path, exe: &Path, remove: bool) -> Result<PathBuf, String> {
 /// (settings can hold keys); the new copy is private until then.
 fn write(path: &Path, text: &str) -> Result<(), String> {
     let fail = |e: std::io::Error| format!("{}: {e}", path.display());
-    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+    let path = link_target(path);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(fail)?;
     }
-    let tmp = path.with_extension("herdr-tmp");
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let tmp = path.with_extension(format!("herdr-tmp-{}-{nanos}", std::process::id()));
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     std::io::Write::write_all(&mut options.open(&tmp).map_err(fail)?, text.as_bytes()).map_err(fail)?;
     if let Ok(meta) = std::fs::metadata(&path) {
         std::fs::set_permissions(&tmp, meta.permissions()).map_err(fail)?;
     }
-    std::fs::rename(&tmp, &path).map_err(fail)
+    std::fs::rename(&tmp, &path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        fail(e)
+    })
+}
+
+/// The file a path names, through links, even one whose file isn't there yet.
+fn link_target(path: &Path) -> PathBuf {
+    let mut path = path.to_owned();
+    for _ in 0..32 {
+        let Ok(next) = std::fs::read_link(&path) else { break };
+        path = path.parent().map_or(next.clone(), |dir| dir.join(&next));
+    }
+    path
 }
 
 #[cfg(test)]
@@ -184,6 +198,13 @@ mod tests {
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "still a link");
         assert!(std::fs::read_to_string(&target).unwrap().contains("agent-session claude"), "its file has the hooks");
         assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o600);
+        let (later, dangling) = (dir.join("dotfiles/later.json"), dir.join("dangling.json"));
+        std::os::unix::fs::symlink(&later, &dangling).unwrap();
+        claude(&dangling, Path::new("/x/herdr-app"), false).unwrap();
+        assert!(std::fs::symlink_metadata(&dangling).unwrap().file_type().is_symlink(), "a link to a file not there yet stays");
+        assert!(std::fs::read_to_string(&later).unwrap().contains("agent-session claude"));
+        let leftovers: Vec<_> = std::fs::read_dir(dir.join("dotfiles")).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().contains("herdr-tmp")).collect();
+        assert!(leftovers.is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 

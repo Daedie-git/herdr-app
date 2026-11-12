@@ -84,23 +84,39 @@ pub fn shell_line(shell: &str, argv: &[String]) -> String {
     argv.iter().map(quote).collect::<Vec<_>>().join(" ")
 }
 
-/// For a live terminal record: the label to clear and the line to type, when
-/// its agent should come back now. Only the app on the terminal's own machine
-/// types it (remote addresses are `machine/t7`): two apps watching one core
-/// would both type it.
-pub fn due(record: &Value) -> Option<(String, String)> {
-    if record["address"].as_str().is_none_or(|a| a.contains('/')) {
+/// For a live terminal record: the line to type, when its agent should come
+/// back now. Only the app on the terminal's own machine types it (remote
+/// addresses are `machine/t7`), and only into its shell, not a program the
+/// person started since.
+pub fn due(record: &Value) -> Option<String> {
+    if record["address"].as_str().is_none_or(|a| a.contains('/')) || !shell_in_front(record) {
         return None;
     }
-    let label = record.pointer(&format!("/labels/{LABEL}"))?.as_str()?;
-    let session = Session::parse(label)?;
-    let pid = record["pid"].as_u64()?;
-    if record["state"] != "live" || pid == session.pid {
+    let session = Session::parse(record.pointer(&format!("/labels/{LABEL}"))?.as_str()?)?;
+    if record["pid"].as_u64() == Some(session.pid) {
         return None;
     }
     let shell = record.pointer("/argv/0").and_then(Value::as_str).unwrap_or_default();
-    let argv = command(&session.agent, &session.reference)?;
-    Some((label.to_owned(), shell_line(shell, &argv)))
+    Some(shell_line(shell, &command(&session.agent, &session.reference)?))
+}
+
+fn shell_in_front(record: &Value) -> bool {
+    let pid = record["pid"].as_u64();
+    record["state"] == "live" && pid.is_some() && record.pointer("/foreground/pid").is_none_or(|f| f.as_u64() == pid)
+}
+
+/// Before typing, an app replaces the label with its claim and reads it back a
+/// moment later: of apps that saw the same label, only the last writer types.
+pub fn claim() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
+    format!("claimed {:016x}", h.finish())
+}
+
+/// Whether `claim` still holds and the shell is still in front.
+pub fn holds(record: &Value, claim: &str) -> bool {
+    record.pointer(&format!("/labels/{LABEL}")).and_then(Value::as_str) == Some(claim) && shell_in_front(record)
 }
 
 /// What a hook reported.
@@ -210,7 +226,17 @@ mod tests {
         let label = format!("100 claude {ID}");
         assert_eq!(due(&rec(json!(100), &label)), None, "same program: quit or crashed inside its shell");
         assert_eq!(due(&rec(Value::Null, &label)), None, "lost, not back yet");
-        assert_eq!(due(&rec(json!(200), &label)), Some((label.clone(), format!("claude --resume {ID}"))));
+        assert_eq!(due(&rec(json!(200), &label)), Some(format!("claude --resume {ID}")));
+        let mut busy = rec(json!(200), &label);
+        busy["foreground"] = json!({ "pid": 300, "argv": ["vim"] });
+        assert_eq!(due(&busy), None, "the person started something else");
+        busy["foreground"]["pid"] = json!(200);
+        assert!(due(&busy).is_some());
+        let mine = claim();
+        assert_ne!(mine, claim());
+        assert!(holds(&rec(json!(200), &mine), &mine));
+        assert!(!holds(&rec(json!(200), &claim()), &mine), "another app claimed it last");
+        assert_eq!(due(&rec(json!(200), &mine)), None, "a claim is not a session");
         assert_eq!(due(&rec(json!(200), "")), None, "ended by the person");
         assert_eq!(due(&json!({ "address": "t1", "state": "live", "pid": 200, "labels": {} })), None);
         let mut remote = rec(json!(200), &label);
