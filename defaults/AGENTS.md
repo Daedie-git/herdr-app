@@ -518,7 +518,8 @@ shortcuts must then be added by hand.
 - An action is a command (`name`, or `name:value`: the value fills the
   command's first argument), `send:<text>` (types into the terminal),
   `<mod>.<command>` (delivered to that mod's `nextCommand()`), or `terminal`
-  (the program gets the key).
+  (the program gets the key). In a Windows machine's terminal, `send:\u001bb`
+  and `send:\u001bf` (readline word moves) go as Ctrl+Left and Ctrl+Right.
 - Named, typed command arguments use an object instead of a string:
   `"ctrl-shift-r": {"command": "layout.resize", "args": {"id": "sidebar", "px": 240}}`.
   `command` names an app command; `args` is an object (optional, defaults to `{}`).

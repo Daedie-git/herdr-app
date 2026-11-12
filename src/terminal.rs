@@ -1538,6 +1538,21 @@ fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
     Some(vt.encode_key(key, mods, consumed, text.as_deref(), unshifted))
 }
 
+/// What a `send:` binding types. A Windows console reads the readline word
+/// moves (ESC b, ESC f) as Alt+B/F, which PowerShell types as letters; there
+/// they go as Ctrl+Left/Right, Windows' word moves.
+fn send_bytes(vt: &mut vt::Vt, text: &str) -> Vec<u8> {
+    let key = match text {
+        "\x1bb" => GHOSTTY_KEY_ARROW_LEFT,
+        "\x1bf" => GHOSTTY_KEY_ARROW_RIGHT,
+        _ => return text.as_bytes().to_vec(),
+    };
+    if !vt.win32.on {
+        return text.as_bytes().to_vec();
+    }
+    vt.encode_key(key, GHOSTTY_MODS_CTRL as GhosttyMods, 0, None, None)
+}
+
 fn control_alias_bytes(vt: &mut vt::Vt, key: GhosttyKey, text: &str, shifted: bool, legacy: Vec<u8>) -> Vec<u8> {
     // libghostty has no mode-2 getter. Probe with printable base text so its
     // encoder can preserve the chord when modifyOtherKeys requests CSI 27.
@@ -2266,7 +2281,10 @@ impl Render for TerminalView {
                 // `send:<text>` bindings from keys.json type into this terminal.
                 match a.id().strip_prefix("send:") {
                     Some(_) if this.find_field_focused(window, cx) => cx.stop_propagation(),
-                    Some(text) => this.send(text.as_bytes()),
+                    Some(text) => {
+                        let bytes = send_bytes(&mut this.grid.borrow_mut().vt, text);
+                        this.send(&bytes);
+                    }
                     None => cx.propagate(),
                 }
             }))
@@ -3799,7 +3817,7 @@ mod tests {
         assert_eq!(shown_title("\u{2839} \u{2838}"), "\u{2839} \u{2838}");
     }
 
-    use super::key_bytes;
+    use super::{key_bytes, send_bytes};
     use crate::vt::Vt;
     use gpui::{KeyDownEvent, Keystroke, Modifiers};
 
@@ -4301,6 +4319,21 @@ mod tests {
         assert_eq!(send(&mut vt, "enter"), "\r");
         vt.write(b"\x1b[?9001l");
         assert_eq!(send(&mut vt, "shift-enter"), "\x1b[27;2;13~");
+    }
+
+    #[test]
+    fn readline_word_moves_go_as_windows_word_keys_to_a_windows_console() {
+        let mut vt = Vt::new(20, 3);
+        assert_eq!(send_bytes(&mut vt, "\x1bb"), b"\x1bb");
+        vt.write(b"\x1b[?9001h");
+        assert_eq!(send_bytes(&mut vt, "\x1bb"), b"\x1b[1;5D");
+        assert_eq!(send_bytes(&mut vt, "\x1bf"), b"\x1b[1;5C");
+        assert_eq!(send_bytes(&mut vt, "\x17"), b"\x17");
+        assert_eq!(send_bytes(&mut vt, "\x1bbx"), b"\x1bbx");
+        vt.write(b"\x1b[=7;1u");
+        assert_eq!(send_bytes(&mut vt, "\x1bb"), b"\x1b[1;5:1D", "in the program's keyboard mode");
+        vt.write(b"\x1b[?9001l");
+        assert_eq!(send_bytes(&mut vt, "\x1bf"), b"\x1bf");
     }
 
     #[test]
