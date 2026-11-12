@@ -52,11 +52,13 @@ fn pi_extensions(home: &Path) -> PathBuf {
 }
 
 /// The hook's command line. Claude Code runs hooks in a POSIX shell (Git
-/// Bash on Windows), where a backslash escapes: Windows paths go with slashes.
+/// Bash on Windows): Windows paths go with slashes, all in single quotes.
 fn hook_command(exe: &Path, agent: &str) -> String {
-    let path = exe.to_string_lossy();
-    let quoted = if cfg!(windows) { format!("\"{}\"", path.replace('\\', "/")) } else { format!("'{}'", path.replace('\'', "'\\''")) };
-    format!("{quoted} agent-session {agent}")
+    let mut path = exe.to_string_lossy().into_owned();
+    if cfg!(windows) {
+        path = path.replace('\\', "/");
+    }
+    format!("'{}' agent-session {agent}", path.replace('\'', "'\\''"))
 }
 
 fn ours(hook: &Value) -> bool {
@@ -116,15 +118,25 @@ fn pi(dir: &Path, exe: &Path, remove: bool) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// Whole or not at all: an agent may read the file while it changes.
+/// Whole or not at all: an agent may read the file while it changes. A link
+/// (dotfiles) keeps pointing at its file, which keeps its permissions
+/// (settings can hold keys); the new copy is private until then.
 fn write(path: &Path, text: &str) -> Result<(), String> {
     let fail = |e: std::io::Error| format!("{}: {e}", path.display());
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(fail)?;
     }
     let tmp = path.with_extension("herdr-tmp");
-    std::fs::write(&tmp, text).map_err(fail)?;
-    std::fs::rename(&tmp, path).map_err(fail)
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    std::io::Write::write_all(&mut options.open(&tmp).map_err(fail)?, text.as_bytes()).map_err(fail)?;
+    if let Ok(meta) = std::fs::metadata(&path) {
+        std::fs::set_permissions(&tmp, meta.permissions()).map_err(fail)?;
+    }
+    std::fs::rename(&tmp, &path).map_err(fail)
 }
 
 #[cfg(test)]
@@ -151,10 +163,28 @@ mod tests {
 
     #[test]
     fn hook_commands_survive_the_hook_shell() {
-        let exe = if cfg!(windows) { Path::new("C:\\Users\\A B\\herdr-app.exe") } else { Path::new("/home/it's/herdr-app") };
-        let expected = if cfg!(windows) { "\"C:/Users/A B/herdr-app.exe\" agent-session claude" } else { "'/home/it'\\''s/herdr-app' agent-session claude" };
+        let exe = if cfg!(windows) { Path::new("C:\\Users\\$(x) it's\\herdr-app.exe") } else { Path::new("/home/$(x) it's/herdr-app") };
+        let expected = if cfg!(windows) { "'C:/Users/$(x) it'\\''s/herdr-app.exe' agent-session claude" } else { "'/home/$(x) it'\\''s/herdr-app' agent-session claude" };
         assert_eq!(hook_command(exe, "claude"), expected);
         assert!(ours(&json!({ "command": expected })));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn settings_keep_their_link_and_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::test_tmp().join(format!("herdr-integrate-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("dotfiles")).unwrap();
+        let (target, link) = (dir.join("dotfiles/settings.json"), dir.join("settings.json"));
+        std::fs::write(&target, r#"{"env":{"KEY":"secret"}}"#).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        claude(&link, Path::new("/x/herdr-app"), false).unwrap();
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "still a link");
+        assert!(std::fs::read_to_string(&target).unwrap().contains("agent-session claude"), "its file has the hooks");
+        assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o600);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

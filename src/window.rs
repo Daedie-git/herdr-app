@@ -1555,8 +1555,8 @@ impl AppWindow {
     }
 
     /// Agents whose terminal was lost and came back as a shell: their resume
-    /// command, typed once (agent_resume.rs). The label goes first, so another
-    /// client or the next listing doesn't type it again.
+    /// command, typed at most once (agent_resume.rs). The label goes first:
+    /// a resume lost to a crash in between beats one typed twice.
     fn resume_agents(&mut self, cx: &mut Context<Self>) {
         self.resuming.retain(|(addr, label)| {
             self.live.get(addr).and_then(|r| r.pointer(&format!("/labels/{}", crate::agent_resume::LABEL))).and_then(Value::as_str) == Some(label)
@@ -1569,18 +1569,17 @@ impl AppWindow {
             tracing::info!("resuming {addr}: {line}");
             let (core, addr) = (self.core.clone(), addr.clone());
             cx.spawn(async move |this, cx| {
-                let (to, kept) = (addr.clone(), label.clone());
-                let result = cx.background_executor().spawn(async move {
-                    let labels = |v: &str| json!({ "terminal": to, "labels": { crate::agent_resume::LABEL: v } });
-                    core.call("terminal.label", labels(""))?;
-                    // Not typed: the label stays for the next try. Send waits for
-                    // the shell to go quiet, and a timeout must not type it twice.
-                    let send = json!({ "terminal": to, "text": line });
-                    core.call_timeout("terminal.send", send, Duration::from_secs(90)).inspect_err(|_| {
-                        let _ = core.call("terminal.label", labels(&kept));
-                    })
+                let to = addr.clone();
+                let cleared = cx.background_executor().spawn(async move {
+                    core.call("terminal.label", json!({ "terminal": to, "labels": { crate::agent_resume::LABEL: "" } }))?;
+                    // An error here may still deliver later: never retried.
+                    let sent = core.call_timeout("terminal.send", json!({ "terminal": to, "text": line }), Duration::from_secs(90));
+                    if let Err(e) = sent {
+                        tracing::warn!("resume of {to} may not have been typed: {e:#}");
+                    }
+                    anyhow::Ok(())
                 }).await;
-                let Err(e) = result else { return };
+                let Err(e) = cleared else { return };
                 tracing::warn!("cannot resume {addr}: {e:#}");
                 let _ = this.update(cx, |this, _| this.resuming.remove(&(addr, label)));
             })

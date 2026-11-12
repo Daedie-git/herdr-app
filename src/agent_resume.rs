@@ -85,8 +85,13 @@ pub fn shell_line(shell: &str, argv: &[String]) -> String {
 }
 
 /// For a live terminal record: the label to clear and the line to type, when
-/// its agent should come back now.
+/// its agent should come back now. Only the app on the terminal's own machine
+/// types it (remote addresses are `machine/t7`): two apps watching one core
+/// would both type it.
 pub fn due(record: &Value) -> Option<(String, String)> {
+    if record["address"].as_str().is_none_or(|a| a.contains('/')) {
+        return None;
+    }
     let label = record.pointer(&format!("/labels/{LABEL}"))?.as_str()?;
     let session = Session::parse(label)?;
     let pid = record["pid"].as_u64()?;
@@ -201,13 +206,16 @@ mod tests {
 
     #[test]
     fn only_a_replaced_program_resumes() {
-        let rec = |pid: Value, label: &str| json!({ "state": "live", "pid": pid, "argv": ["/bin/zsh"], "labels": { LABEL: label } });
+        let rec = |pid: Value, label: &str| json!({ "address": "t1", "state": "live", "pid": pid, "argv": ["/bin/zsh"], "labels": { LABEL: label } });
         let label = format!("100 claude {ID}");
         assert_eq!(due(&rec(json!(100), &label)), None, "same program: quit or crashed inside its shell");
         assert_eq!(due(&rec(Value::Null, &label)), None, "lost, not back yet");
         assert_eq!(due(&rec(json!(200), &label)), Some((label.clone(), format!("claude --resume {ID}"))));
         assert_eq!(due(&rec(json!(200), "")), None, "ended by the person");
-        assert_eq!(due(&json!({ "state": "live", "pid": 200, "labels": {} })), None);
+        assert_eq!(due(&json!({ "address": "t1", "state": "live", "pid": 200, "labels": {} })), None);
+        let mut remote = rec(json!(200), &label);
+        remote["address"] = "vps/t1".into();
+        assert_eq!(due(&remote), None, "the app on that machine resumes it");
     }
 
     #[test]

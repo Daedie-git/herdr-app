@@ -72,9 +72,10 @@ those hooks.
 - A person ending the session (Claude Code's `/exit`, pi's `/quit`) writes
   it empty. A signal (OS logout, shutdown) leaves it.
 - A live terminal whose `pid` differs from the label's lost its program and
-  came back as a shell: a client clears the label, then types the agent's
-  resume command (`claude --resume <id>`) with `terminal.send`. Same `pid`:
-  the agent ended inside its shell, so nothing is typed.
+  came back as a shell: the Herdr app on that terminal's machine clears the
+  label, then types the agent's resume command (`claude --resume <id>`) with
+  `terminal.send`, once. Same `pid`: the agent ended inside its shell, so
+  nothing is typed.
 - Clients refuse agents they don't know and session values that aren't a
   plain id or an absolute path without quotes, so a label never types more
   than that one command.
