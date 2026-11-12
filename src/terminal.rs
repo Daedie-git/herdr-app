@@ -261,7 +261,6 @@ fn track_mouse_button(buttons: &mut Vec<MouseButton>, action: GhosttyMouseAction
 impl TerminalView {
     /// Waits for pane layout before replay, bounded so an unpainted view still attaches.
     pub fn attach(core: Arc<Core>, address: String, size_hint: (u16, u16), cx: &mut Context<Self>) -> Self {
-        watch_keys(cx);
         let attach_deadline = cx.background_executor().now() + Duration::from_millis(100);
         let mut view = TerminalView {
             address: address.clone(),
@@ -1539,26 +1538,13 @@ fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
     Some(vt.encode_key(key, mods, consumed, text.as_deref(), unshifted))
 }
 
-thread_local! {
-    /// The key being dispatched: bindings run before the terminal sees it.
-    static LAST_KEY: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
-}
-
-fn watch_keys(cx: &mut App) {
-    thread_local!(static WATCHING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
-    if !WATCHING.replace(true) {
-        cx.intercept_keystrokes(|ev, _, _| LAST_KEY.set(ev.keystroke.key.clone())).detach();
-    }
-}
-
-/// What a `send:` binding types. A Windows console reads the readline word
-/// moves (ESC b, ESC f) as Alt+B/F, which PowerShell types as letters. Bound
-/// to Left/Right (the shipped keys), they go there as Ctrl+Left/Right,
-/// Windows' word moves; on other keys they stay literal.
-fn send_bytes(vt: &mut vt::Vt, text: &str, key: &str) -> Vec<u8> {
-    let arrow = match (text, key) {
-        ("\x1bb", "left") => GHOSTTY_KEY_ARROW_LEFT,
-        ("\x1bf", "right") => GHOSTTY_KEY_ARROW_RIGHT,
+/// A readline word move bound to Left/Right. A Windows console reads ESC b
+/// and ESC f as Alt+B/F, which PowerShell types as letters; there they go as
+/// Ctrl+Left/Right, Windows' word moves.
+fn word_move_bytes(vt: &mut vt::Vt, text: &str) -> Vec<u8> {
+    let arrow = match text {
+        "\x1bb" => GHOSTTY_KEY_ARROW_LEFT,
+        "\x1bf" => GHOSTTY_KEY_ARROW_RIGHT,
         _ => return text.as_bytes().to_vec(),
     };
     if !vt.win32.on {
@@ -2295,12 +2281,14 @@ impl Render for TerminalView {
                 // `send:<text>` bindings from keys.json type into this terminal.
                 match a.id().strip_prefix("send:") {
                     Some(_) if this.find_field_focused(window, cx) => cx.stop_propagation(),
-                    Some(text) => {
-                        let key = LAST_KEY.with_borrow(|k| k.clone());
-                        let bytes = send_bytes(&mut this.grid.borrow_mut().vt, text, &key);
-                        this.send(&bytes);
-                    }
+                    Some(text) => this.send(text.as_bytes()),
                     None => cx.propagate(),
+                }
+            }))
+            .on_action(cx.listener(|this, a: &crate::keys::WordMove, window, cx| {
+                if !this.find_field_focused(window, cx) {
+                    let bytes = word_move_bytes(&mut this.grid.borrow_mut().vt, &a.text);
+                    this.send(&bytes);
                 }
             }))
             .on_key_down(cx.listener(Self::key_down))
@@ -3832,7 +3820,7 @@ mod tests {
         assert_eq!(shown_title("\u{2839} \u{2838}"), "\u{2839} \u{2838}");
     }
 
-    use super::{key_bytes, send_bytes};
+    use super::{key_bytes, word_move_bytes};
     use crate::vt::Vt;
     use gpui::{KeyDownEvent, Keystroke, Modifiers};
 
@@ -4337,19 +4325,16 @@ mod tests {
     }
 
     #[test]
-    fn readline_word_moves_on_arrows_go_as_windows_word_keys_to_a_windows_console() {
+    fn readline_word_moves_go_as_windows_word_keys_to_a_windows_console() {
         let mut vt = Vt::new(20, 3);
-        assert_eq!(send_bytes(&mut vt, "\x1bb", "left"), b"\x1bb");
+        assert_eq!(word_move_bytes(&mut vt, "\x1bb"), b"\x1bb");
         vt.write(b"\x1b[?9001h");
-        assert_eq!(send_bytes(&mut vt, "\x1bb", "left"), b"\x1b[1;5D");
-        assert_eq!(send_bytes(&mut vt, "\x1bf", "right"), b"\x1b[1;5C");
-        assert_eq!(send_bytes(&mut vt, "\x1bb", "f2"), b"\x1bb", "a Meta-B binding elsewhere stays literal");
-        assert_eq!(send_bytes(&mut vt, "\x1bf", "left"), b"\x1bf");
-        assert_eq!(send_bytes(&mut vt, "\x17", "backspace"), b"\x17");
+        assert_eq!(word_move_bytes(&mut vt, "\x1bb"), b"\x1b[1;5D");
+        assert_eq!(word_move_bytes(&mut vt, "\x1bf"), b"\x1b[1;5C");
         vt.write(b"\x1b[=7;1u");
-        assert_eq!(send_bytes(&mut vt, "\x1bb", "left"), b"\x1b[1;5:1D", "in the program's keyboard mode");
+        assert_eq!(word_move_bytes(&mut vt, "\x1bb"), b"\x1b[1;5:1D", "in the program's keyboard mode");
         vt.write(b"\x1b[?9001l");
-        assert_eq!(send_bytes(&mut vt, "\x1bf", "right"), b"\x1bf");
+        assert_eq!(word_move_bytes(&mut vt, "\x1bf"), b"\x1bf");
     }
 
     #[test]

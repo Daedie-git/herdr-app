@@ -63,6 +63,21 @@ pub struct CommandBinding {
     pub value: serde_json::Map<String, serde_json::Value>,
 }
 
+/// A readline word move bound to an arrow (`send:\u001bb` on Left,
+/// `send:\u001bf` on Right): terminals send Windows' word move to a Windows console.
+#[derive(Clone, PartialEq, gpui::Action, serde::Deserialize)]
+#[action(no_json)]
+pub struct WordMove {
+    pub text: String,
+}
+
+fn word_move(keys: &str, action: &str) -> Option<WordMove> {
+    let key = keys.split_whitespace().last()?;
+    let key = key.rsplit_once('-').map_or(key, |(_, k)| k);
+    let text = action.strip_prefix("send:")?;
+    matches!((text, key), ("\x1bb", "left") | ("\x1bf", "right")).then(|| WordMove { text: text.to_owned() })
+}
+
 impl CommandBinding {
     pub fn command(&self) -> Result<(String, serde_json::Value), String> {
         use serde_json::{Value, json};
@@ -233,6 +248,8 @@ pub fn parse(text: &str) -> Result<Vec<KeyBinding>, String> {
                     continue;
                 }
                 Box::new(NoAction)
+            } else if let Some(word) = word_move(keys, string.as_deref().unwrap_or_default()) {
+                Box::new(word)
             } else {
                 let action = string.as_ref().expect("string binding");
                 #[cfg(target_os = "macos")]
@@ -277,6 +294,19 @@ pub fn install(bindings: Vec<KeyBinding>, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_readline_word_moves_on_arrows_become_word_moves() {
+        let text = r#"{"terminal":{"ctrl-left":"send:\u001bb","alt-right":"send:\u001bf","f2 left":"send:\u001bb","f2":"send:\u001bb","left":"send:\u001bf","ctrl-backspace":"send:\u0017"}}"#;
+        let mut words: Vec<(String, String)> = super::parse(text).unwrap().iter()
+            .filter_map(|b| {
+                let word = b.action().as_any().downcast_ref::<super::WordMove>()?;
+                Some((b.keystrokes().iter().map(|k| k.unparse()).collect::<Vec<_>>().join(" "), word.text.clone()))
+            })
+            .collect();
+        words.sort();
+        assert_eq!(words, [("alt-right".into(), "\x1bf".into()), ("ctrl-left".into(), "\x1bb".into()), ("f2 left".into(), "\x1bb".into())]);
+    }
+
     #[test]
     fn only_byte_identical_shipped_keys_are_upgraded() {
         let dir = std::env::temp_dir().join(format!("herdr-keys-migration-{}", std::process::id()));
