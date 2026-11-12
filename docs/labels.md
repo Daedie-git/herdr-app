@@ -60,6 +60,25 @@ client's usual order.
 In the desktop app, mods pin with `terminal.pin {terminal, pinned}` and
 read `pinned` from `agents()`; they never write the label themselves.
 
+## `herdr.resume=<pid> <agent> <session>`: bring an agent back
+
+An agent's hook writes it when a session starts: the terminal's `pid` at that
+moment, the agent (`claude`, `codex`, `pi`, `omp`, `opencode`, `copilot`,
+`cursor`, `droid`, `grok`, `hermes`, `kimi`, `qwen`), and its session id
+(pi and omp: a session file also works). `herdr-app agent-session <agent>`
+writes it from hook input on stdin; `herdr-app integrate claude|pi` installs
+those hooks.
+
+- A person ending the session (Claude Code's `/exit`, pi's `/quit`) writes
+  it empty. A signal (OS logout, shutdown) leaves it.
+- A live terminal whose `pid` differs from the label's lost its program and
+  came back as a shell: a client clears the label, then types the agent's
+  resume command (`claude --resume <id>`) with `terminal.send`. Same `pid`:
+  the agent ended inside its shell, so nothing is typed.
+- Clients refuse agents they don't know and session values that aren't a
+  plain id or an absolute path without quotes, so a label never types more
+  than that one command.
+
 ## Adding more
 
 Labels suit small values that change at human speed. Use the `herdr.`

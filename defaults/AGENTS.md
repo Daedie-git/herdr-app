@@ -134,7 +134,11 @@ the highlighted line shows where it will land.
   Terminal panes are kept by their machine's core (`keep: true`). A lost
   terminal (core crash, reboot, logout) gets a shell in its last folder,
   with the same address; its original command is never run again. Splits
-  and mod panes stay. An exited or killed terminal is closed, not restarted.
+  and mod panes stay. An agent with a resume hook comes back in its session:
+  Herdr types its resume command (`claude --resume <id>`) into that shell.
+  `herdr-app integrate claude|pi` installs the hook (ask the user first; it
+  edits their agent's settings). Other agents' hooks can do the same with
+  the `herdr.resume` label (`docs/labels.md` in the Herdr repo). An exited or killed terminal is closed, not restarted.
   Focus, zoom, recent spaces, settled tabs and seen attention stay on this screen.
 - Every terminal is a core terminal. Herdr labels the ones it starts with
   `herdr.space=<id>` and `herdr.tab=<id>`. **A terminal with those

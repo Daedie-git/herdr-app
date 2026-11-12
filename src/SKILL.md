@@ -20,6 +20,10 @@ prints the built-in command list even without an open window. Do not launch bare
 signal or restart the person's app or core. A window closing does not kill
 its terminals.
 
+After a reboot or core crash, panes come back as shells. `herdr-app integrate
+claude` (or `pi`) installs a hook so that agent comes back in its session;
+it edits the agent's settings, so run it only when the person asks.
+
 `app.check_updates` checks for newer releases. Settings reports "Up to date"
 only after a successful check; on failure, check the connection and retry.
 Package-managed cores are checked but updated through their package manager.

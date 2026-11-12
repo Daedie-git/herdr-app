@@ -407,6 +407,8 @@ pub struct AppWindow {
     written_where: HashMap<String, String>,
     /// `herdr.seen` turns written but not yet back from the core.
     written_seen: HashMap<String, u64>,
+    /// Agent sessions being brought back: (address, `herdr.resume` label).
+    resuming: HashSet<(String, String)>,
     /// Agents the person is looking at, and the turn they were shared as seen at.
     looked: HashMap<String, u64>,
     watched: Watched,
@@ -513,6 +515,7 @@ impl AppWindow {
             reply: None,
             written_where: HashMap::new(),
             written_seen: HashMap::new(),
+            resuming: HashSet::new(),
             looked: HashMap::new(),
             watched: Watched::default(),
             live: HashMap::new(),
@@ -1551,6 +1554,40 @@ impl AppWindow {
         cx.notify();
     }
 
+    /// Agents whose terminal was lost and came back as a shell: their resume
+    /// command, typed once (agent_resume.rs). The label goes first, so another
+    /// client or the next listing doesn't type it again.
+    fn resume_agents(&mut self, cx: &mut Context<Self>) {
+        self.resuming.retain(|(addr, label)| {
+            self.live.get(addr).and_then(|r| r.pointer(&format!("/labels/{}", crate::agent_resume::LABEL))).and_then(Value::as_str) == Some(label)
+        });
+        for (addr, rec) in &self.live {
+            let Some((label, line)) = crate::agent_resume::due(rec) else { continue };
+            if !self.resuming.insert((addr.clone(), label.clone())) {
+                continue;
+            }
+            tracing::info!("resuming {addr}: {line}");
+            let (core, addr) = (self.core.clone(), addr.clone());
+            cx.spawn(async move |this, cx| {
+                let (to, kept) = (addr.clone(), label.clone());
+                let result = cx.background_executor().spawn(async move {
+                    let labels = |v: &str| json!({ "terminal": to, "labels": { crate::agent_resume::LABEL: v } });
+                    core.call("terminal.label", labels(""))?;
+                    // Not typed: the label stays for the next try. Send waits for
+                    // the shell to go quiet, and a timeout must not type it twice.
+                    let send = json!({ "terminal": to, "text": line });
+                    core.call_timeout("terminal.send", send, Duration::from_secs(90)).inspect_err(|_| {
+                        let _ = core.call("terminal.label", labels(&kept));
+                    })
+                }).await;
+                let Err(e) = result else { return };
+                tracing::warn!("cannot resume {addr}: {e:#}");
+                let _ = this.update(cx, |this, _| this.resuming.remove(&(addr, label)));
+            })
+            .detach();
+        }
+    }
+
     /// Shares what the person looks at as `herdr.seen` (docs/labels.md): an
     /// agent on screen in the active window, once per turn while it stays
     /// there, so a phone marking it unread isn't undone by a screen nobody
@@ -2061,6 +2098,7 @@ impl AppWindow {
             }
         }
         self.live = live;
+        self.resume_agents(cx);
         self.closing_terminals.retain(|addr, completed| !*completed || self.live.contains_key(addr));
         // A new sub-agent changes only this list; mods that show teams need to redraw.
         let terminals_changed = mods::publish_terminals(list);

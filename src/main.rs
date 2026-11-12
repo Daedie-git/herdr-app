@@ -1,12 +1,14 @@
 // Windows: a window app, but tests inherit Cargo's console for their child processes.
 #![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
+mod agent_resume;
 mod bench;
 mod commands;
 mod control;
 mod core_bin;
 mod files;
 mod hc;
+mod integrate;
 mod keys;
 mod layout;
 mod layout_sync;
@@ -53,6 +55,8 @@ Usage:
   herdr-app status                 what the window shows, and any errors
   herdr-app shot [file.png]        save the last window frame (default: herdr-shot.png)
   herdr-app check <mod folder>     load a mod once and report what's wrong
+  herdr-app integrate <claude|pi>  hooks that bring an agent's session back after a reboot (--remove)
+  herdr-app agent-session <agent>  for those hooks: report a session (hook JSON on stdin)
   herdr-app --skill                Agent Skill: driving the window, and where hc fits
   herdr-app --version
 
@@ -105,6 +109,8 @@ fn main() {
         None if control::raise_running() => return,
         None => {}
         Some("-h" | "--help" | "help") => return print!("{HELP}"),
+        Some("integrate") => std::process::exit(integrate::main(&args[2..])),
+        Some("agent-session") => std::process::exit(agent_resume::report(&args[2..])),
         Some("--skill") => return print!("{}", include_str!("SKILL.md")),
         Some("-V" | "--version" | "version") => return println!("herdr-app {}", env!("CARGO_PKG_VERSION")),
         Some(other) => {
