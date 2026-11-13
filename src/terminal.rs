@@ -733,12 +733,12 @@ impl TerminalView {
         }
     }
 
-    /// Ctrl+V: a remote image, clipboard text for a Windows program, or the key itself.
+    /// Ctrl+V: a remote image, clipboard text on Windows, or the key itself.
     pub fn paste_image(&mut self, cx: &mut Context<Self>) {
         if self.send_image(cx) {
             return;
         }
-        let text = cx.read_from_clipboard().and_then(|c| c.text());
+        let text = if cfg!(windows) { cx.read_from_clipboard().and_then(|c| c.text()) } else { None };
         let bytes = paste_image_fallback(&mut self.grid.borrow_mut().vt, text.as_deref());
         if let Some(bytes) = bytes {
             self.send(&bytes);
@@ -1449,9 +1449,8 @@ fn fallback_icon(text: &str, font: &Font, ts: &gpui::TextSystem) -> Option<IconG
 }
 
 fn paste_image_fallback(vt: &mut vt::Vt, text: Option<&str>) -> Option<Vec<u8>> {
-    // Windows console programs expect the terminal to paste clipboard text,
-    // here or on another machine (ConPTY asks every viewer for win32 input).
-    if (cfg!(windows) || vt.win32.on) && let Some(text) = text {
+    // Windows console programs expect the terminal to paste clipboard text.
+    if cfg!(windows) && let Some(text) = text {
         return Some(vt.paste_bytes(text));
     }
     let keystroke = Keystroke::parse("ctrl-v").ok()?;
@@ -4109,16 +4108,6 @@ mod tests {
             let expected = if cfg!(windows) { vt.paste_bytes("paste-probe") } else { vec![0x16] };
             assert_eq!(bytes, expected);
         }
-    }
-
-    #[test]
-    fn ctrl_v_pastes_clipboard_text_into_a_windows_console_on_any_machine() {
-        let mut vt = Vt::new(20, 3);
-        vt.write(b"\x1b[?2004h\x1b[?9001h");
-        assert_eq!(super::paste_image_fallback(&mut vt, Some("paste-probe")).unwrap(), vt.paste_bytes("paste-probe"));
-        vt.write(b"\x1b[?9001l");
-        let expected = if cfg!(windows) { vt.paste_bytes("paste-probe") } else { vec![0x16] };
-        assert_eq!(super::paste_image_fallback(&mut vt, Some("paste-probe")).unwrap(), expected);
     }
 
     #[cfg(target_os = "macos")]
