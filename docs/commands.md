@@ -93,12 +93,13 @@ Rename a tab (asks the person when no name; an empty name: called by its number 
 
 ## `tab.move`
 
-Move a tab to a position in its space (1 = first).
+Move a tab (the active one if no id) to a position in its space (1 = first), or `by` places left (-) or right (+), wrapping.
 
 | Argument | Required |
 |---|---|
-| `id` | yes |
-| `index` | yes |
+| `id` | no |
+| `index` | no |
+| `by` | no |
 
 ## `pane.split`
 
@@ -240,6 +241,15 @@ Show only this pane of its tab, or all again.
 |---|---|
 | `pane` | no |
 
+## `pane.rename`
+
+Name a pane (default: the focused one; asks the person when no name; an empty name: unnamed again).
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `name` | no |
+
 ## `pane.focus`
 
 Focus a pane (or the pane showing a terminal).
@@ -256,6 +266,16 @@ Focus the pane or focusable mod to the "left", "right", "up" or "down".
 | Argument | Required |
 |---|---|
 | `direction` | yes |
+
+## `pane.resize`
+
+Move the border of a pane (default: the focused one) "left", "right", "up" or "down" by px (default 40), like dragging the divider.
+
+| Argument | Required |
+|---|---|
+| `direction` | yes |
+| `pane` | no |
+| `px` | no |
 
 ## `pane.swap`
 
@@ -287,6 +307,33 @@ Show a terminal in a pane for now, in place of its own (no terminal: back).
 ## `terminal.select_all`
 
 Select a terminal's whole screen and scrollback (default: the focused one), ready to copy. On the alternate screen, select only that screen.
+
+| Argument | Required |
+|---|---|
+| `terminal` | no |
+
+## `terminal.select`
+
+Start a terminal selection (default: the focused one), replacing the old selection. at defaults to "cursor" or takes {row, col}: zero-based cells, rows from the top of the history including the active screen. mode is "cell" (default), "word" or "line" (like double/triple click). Mods read the inclusive endpoints from focused().selection or terminals(); selection.end is the moving end.
+
+| Argument | Required |
+|---|---|
+| `terminal` | no |
+| `at` | no |
+| `mode` | no |
+
+## `terminal.adjust_selection`
+
+Move the selection's moving end: left, right, up, down, page_up, page_down, home, end, line_start or line_end. The view follows the moving end. Fails if there is no selection. Defaults to the focused terminal.
+
+| Argument | Required |
+|---|---|
+| `terminal` | no |
+| `direction` | yes |
+
+## `terminal.clear_selection`
+
+Clear a terminal's selection (default: the focused one).
 
 | Argument | Required |
 |---|---|

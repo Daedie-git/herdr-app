@@ -160,6 +160,67 @@ export default class extends View {
     }
 }
 
+/// `scroll_to_bottom` means the end of the list as it is drawn next: asked
+/// before the first frame, or in the handler that adds rows, it still lands on
+/// the last row.
+#[gpui::test]
+fn a_virtual_list_scrolls_to_the_bottom_of_the_rows_it_draws_next(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let fixture = Fixture::new(r#"
+import { View, div } from "gpui-kit";
+import { VirtualListScrollHandle, v_virtual_list } from "gpui-base";
+import { note } from "fixture";
+export default class extends View {
+  init(_, cx) {
+    this.count = 50;
+    this.rows = VirtualListScrollHandle.new();
+    this.rows.scroll_to_bottom();
+    this.focus = cx.focus_handle();
+    this.focus.focus();
+  }
+  render() {
+    return div().size_full().track_focus(this.focus)
+      .on_key_down((e, cx) => {
+        this.count += 10;
+        this.rows.scroll_to_bottom();
+        cx.notify();
+      })
+      .child(div().w(40).h(100).child(v_virtual_list("rows", this.count, 20, (i) => String(i),
+        (range) => {
+          note(range.end);
+          return Array.from({ length: range.end - range.start }, (_, i) => div().h(20).child(String(range.start + i)));
+        })
+        .track_scroll(this.rows)));
+  }
+}"#);
+    let drawn = Rc::new(Cell::new(0));
+    let last = drawn.clone();
+    gpui_shell::policy::set_default(Policy::new().with_host_module(
+        HostModule::new("fixture").function("note", move |a| {
+            last.set(a.number(0)? as usize);
+            Ok(HostValue::Null)
+        })
+    ).unwrap());
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| Mounted(runtime.try_load(&fixture.0, window, cx).unwrap()));
+    let mut visual = VisualTestContext::from_window(*window.deref(), cx);
+    let settle = |visual: &mut VisualTestContext| {
+        for _ in 0..3 {
+            visual.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx);
+            });
+            visual.run_until_parked();
+        }
+        drawn.get()
+    };
+    assert_eq!(settle(&mut visual), 50, "asked before the first frame: the last row is drawn");
+    visual.simulate_keystrokes("a");
+    assert_eq!(settle(&mut visual), 60, "asked in the handler that added rows: the new last row is drawn");
+    visual.update(|window, _| window.remove_window());
+    visual.run_until_parked();
+}
+
 #[gpui::test]
 fn external_file_drops_reach_mod_elements(cx: &mut TestAppContext) {
     use gpui::{ExternalPaths, FileDropEvent, InputEvent};
@@ -406,6 +467,57 @@ export default class extends View {
     visual.run_until_parked();
     assert_eq!(*notes.borrow(), vec!["focus", "down", "up"]);
     set_shown_copies(Default::default());
+}
+
+#[gpui::test]
+fn herdr_checking_is_false_in_a_live_load(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let fixture = Fixture::new(r#"
+import { View, div } from "gpui-kit";
+import { checking } from "herdr";
+import { note } from "fixture";
+export default class extends View {
+  init() { note(String(checking())); }
+  render() { return div(); }
+}"#);
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let calls = seen.clone();
+    gpui_shell::policy::set_default(Policy::new()
+        .with_host_module(module(Instance { name: "test".into(), props: Value::Null }, 0)).unwrap()
+        .with_host_module(HostModule::new("fixture").function("note", move |a| {
+            calls.borrow_mut().push(a.string(0)?.to_owned());
+            Ok(HostValue::Null)
+        })).unwrap());
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    let _root = window.update(cx, |_, window, cx| runtime.try_load(&fixture.0, window, cx).unwrap()).unwrap();
+    assert_eq!(*seen.borrow(), ["false"]);
+}
+
+#[gpui::test]
+fn herdr_checking_is_true_while_a_check_loads_the_mod(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let fixture = Fixture::new(r#"
+import { View, div } from "gpui-kit";
+import { checking } from "herdr";
+import { note } from "fixture";
+export default class extends View {
+  init() { note(String(checking())); }
+  render() { return div(); }
+}"#);
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let calls = seen.clone();
+    gpui_shell::policy::set_default(Policy::new().with_host_module(
+        HostModule::new("fixture").function("note", move |a| {
+            calls.borrow_mut().push(a.string(0)?.to_owned());
+            Ok(HostValue::Null)
+        })
+    ).unwrap());
+    install_check_policy();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    let _root = window.update(cx, |_, window, cx| runtime.try_load(&fixture.0, window, cx).unwrap()).unwrap();
+    assert_eq!(*seen.borrow(), ["true"]);
 }
 
 #[gpui::test]
