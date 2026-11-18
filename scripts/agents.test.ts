@@ -210,15 +210,15 @@ for (const sort of ["priority", "grouped"]) for (const named of [false, true]) t
 });
 
 // A kept sub-agent: started by t1 (`hc run`), then given a pane (`terminal.keep`).
-function keptRender(sort: string, { width = 268, kept = [{ address: "t3", parent: "t1" }], paneless = [] as { address: string; parent: string }[], pinned = [] as string[] } = {}) {
+function keptRender(sort: string, { width = 268, kept = [{ address: "t3", parent: "t1" }], paneless = [] as { address: string; parent: string }[], pinned = [] as string[], labels = {} as Record<string, Record<string, string>>, statuses = {} as Record<string, string>, root = "t1" } = {}) {
   const program = { name: "Claude", key: "claude", agent: true };
-  const row = (address: string, seq: number) => ({ address, pane: `p-${address}`, tab: "tab1", space: "s1", space_name: "Project", program, title: `Task ${address}`, status: "working", seq, pinned: pinned.includes(address) });
-  const list = [row("t1", 1), ...kept.map((k, i) => row(k.address, i + 2))];
-  const live = (address: string, parent: string | null) => ({ address, parent, state: "live", status: "working", program, labels: {} });
+  const row = (address: string, seq: number) => ({ address, pane: `p-${address}`, tab: "tab1", space: "s1", space_name: "Project", program, title: `Task ${address}`, status: statuses[address] ?? "working", seq, pinned: pinned.includes(address) });
+  const list = [row(root, 1), ...kept.map((k, i) => row(k.address, i + 2))];
+  const live = (address: string, parent: string | null) => ({ address, parent, state: "live", status: statuses[address] ?? "working", program, labels: labels[address] ?? {} });
   const orders: string[][] = [];
   const { agents, writes } = harness([], {
     agents: () => list,
-    terminals: () => [live("t1", null), ...paneless.map(k => live(k.address, k.parent)), ...kept.map(k => live(k.address, k.parent))],
+    terminals: () => [live(root, null), ...paneless.map(k => live(k.address, k.parent)), ...kept.map(k => live(k.address, k.parent))],
     panes: () => list.map(a => ({ tab: a.tab, terminal: a.address, program, title: a.title })), focused: () => null,
     spaces: () => [{ tabs: [{ id: "tab1", name: "Project", named: true }] }],
     layout: () => ({ id: "sidebar", size: { px: width } }), shared: () => sort,
@@ -264,6 +264,64 @@ for (const sort of ["priority", "grouped"]) test(`${sort}: a kept sub-agent keep
   expect(pinned.texts.get("ag-t1")).toContain("Task t1");
   expect(pinned.texts.get("ag-t3")).toContain("Task t3");
   expect(keptRender(sort, { kept: [{ address: "t3", parent: "t9" }] }).ids).toContain("ag-t3"); // its parent ended
+});
+
+for (const sort of ["priority", "grouped"]) test(`${sort}: Claude's sidecar list hides finished requests without treating live terminals as finished`, () => {
+  const root = "remote/t1";
+  const active = "sidecar-1-reviewer";
+  const waiting = "sidecar-2-researcher";
+  const label = "claude-sidecar.active";
+  const named = (id: string) => ({ "herdr-subagents.agent": id });
+  const labels = {
+    [root]: { [label]: JSON.stringify([["", active, false], ["other", waiting, true]]) },
+    "remote/t3": named("sidecar-3-reviewer"), // An old failure, still live and with its own pane.
+    "remote/t4": named(active),
+    "other/t4": named(active), // Same agent name on a different core.
+    "other/t5": named(`${waiting}-r2`), // Reopened under a different terminal name.
+    "remote/t6": { "sidecar.agent": "legacy" },
+    "remote/t7": named("independent-helper"),
+  };
+  const args = { root, labels, kept: [{ address: "remote/t3", parent: root }], pinned: ["remote/t3"],
+    paneless: ["remote/t4", "other/t4", "other/t5", "remote/t6", "remote/t7"].map(address => ({ address, parent: root })),
+    statuses: { [root]: "done", "remote/t3": "blocked", "other/t4": "error", "other/t5": "idle", "remote/t6": "error" } };
+  const before = keptRender(sort, args);
+  expect(before.ids.filter(id => id.startsWith("sub-"))).toEqual(["sub-remote/t4", "sub-other/t5", "sub-remote/t7"]);
+  expect(before.ids).not.toContain("ag-remote/t3");
+  expect(before.texts.get("sub-other/t5")).toMatch(/!|Needs you/);
+  labels[root][label] = "[]";
+  const after = keptRender(sort, { ...args, statuses: { ...args.statuses, "remote/t7": "idle" } });
+  expect(after.ids.filter(id => id.startsWith("sub-"))).toEqual(["sub-remote/t7"]);
+  expect(after.texts.get("ag-" + root)).not.toMatch(/!|Needs you/);
+  expect(keptRender(sort, { ...args, width: 44 }).order).toEqual([root]);
+  for (const unknown of ["", '["not a snapshot"]']) {
+    labels[root][label] = unknown;
+    expect(keptRender(sort, args).ids).toContain("sub-remote/t3");
+  }
+});
+
+for (const sort of ["priority", "grouped"]) test(`${sort}: Pi's run list hides stale child terminals only on machines it has reported`, () => {
+  const root = "remote/t1";
+  const label = "pi-subagents.active";
+  const managed = { "herdr-subagents.agent": "explore" };
+  const labels = {
+    [root]: { [label]: JSON.stringify([["", [["t4", true]]], ["known", [["t4", false]]]]) },
+    "remote/t3": managed,
+    "remote/t4": managed,
+    "known/t4": managed,
+    "known/t5": managed,
+    "unknown/t4": managed,
+  };
+  const args = { root, labels, kept: [{ address: "remote/t3", parent: root }], pinned: ["remote/t3"],
+    paneless: ["remote/t4", "known/t4", "known/t5", "unknown/t4", "remote/t6"].map(address => ({ address, parent: root })),
+    statuses: { [root]: "done", "remote/t3": "blocked", "remote/t4": "idle", "known/t5": "error" } };
+  const before = keptRender(sort, args);
+  expect(before.ids.filter(id => id.startsWith("sub-"))).toEqual(["sub-remote/t4", "sub-known/t4", "sub-unknown/t4", "sub-remote/t6"]);
+  expect(before.ids).not.toContain("ag-remote/t3");
+  expect(before.texts.get("sub-remote/t4")).toMatch(/!|Needs you/);
+  labels[root][label] = JSON.stringify([["", []], ["known", [["t5", false]]]]);
+  const after = keptRender(sort, { ...args, statuses: { ...args.statuses, "known/t5": "working" } });
+  expect(after.ids.filter(id => id.startsWith("sub-"))).toEqual(["sub-known/t5", "sub-unknown/t4", "sub-remote/t6"]);
+  expect(after.texts.get("ag-" + root)).not.toMatch(/!|Needs you/);
 });
 
 for (const width of [268, 44]) test(`the focused agent's row is marked as selected ${width < 160 ? "in the rail" : "in the wide list"}`, () => {

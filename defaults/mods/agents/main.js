@@ -53,9 +53,55 @@ const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
 // A sub-agent without a pane isn't in agents(): its raw word, error counting as
 // blocked. It's never done: it reports to its parent, and the parent's done is the news.
 const kidStatus = (k, listed) => {
-  const s = listed.get(k.address) ?? k.status;
+  const s = k.coordinatorBlocked ? "blocked" : listed.get(k.address) ?? k.status;
   return s === "error" ? "blocked" : s === "done" ? "idle" : s;
 };
+
+const machineOf = (address) => address.includes("/") ? address.split("/", 1)[0] : "";
+
+const tuple = (row, length) => Array.isArray(row) && row.length === length;
+function snapshot(label, validRow) {
+  if (!label) return undefined;
+  try {
+    const rows = JSON.parse(label);
+    if (Array.isArray(rows) && rows.every(validRow)) return rows;
+  } catch { /* Missing/unsupported snapshots keep the normal terminal view. */ }
+}
+
+// Coordinators publish their active work on their own terminal. The child process
+// may outlive several requests, so its process status cannot decide visibility.
+function coordinatorView(all) {
+  const piRuns = new Map();
+  const claudeSlots = new Map();
+  for (const t of all) {
+    const pi = snapshot(t.labels?.["pi-subagents.active"], scope => tuple(scope, 2) && typeof scope[0] === "string"
+      && Array.isArray(scope[1]) && scope[1].every(row => tuple(row, 2) && typeof row[0] === "string" && typeof row[1] === "boolean"));
+    if (pi) piRuns.set(t.address, new Map(pi.map(([machine, rows]) => [machine || machineOf(t.address), new Map(rows)])));
+    const claude = snapshot(t.labels?.["claude-sidecar.active"], row => tuple(row, 3)
+      && typeof row[0] === "string" && typeof row[1] === "string" && typeof row[2] === "boolean");
+    if (claude) claudeSlots.set(t.address, claude);
+  }
+  const hidden = new Set();
+  const waiting = new Set();
+  const visible = all.filter(t => {
+    if (!t.parent) return true;
+    const name = t.labels?.["herdr-subagents.agent"];
+    const machine = machineOf(t.address);
+    const pi = name && piRuns.get(t.parent)?.get(machine);
+    const claude = claudeSlots.get(t.parent);
+    let blocked;
+    if (pi) blocked = pi.get(t.address.split("/").at(-1));
+    else if (claude && (/^sidecar-\d+-/.test(name ?? "") || t.labels?.["sidecar.agent"])) {
+      const suffix = name?.match(/-r[1-9]\d*$/)?.[0];
+      blocked = claude.find(([scope, id]) => (scope || machineOf(t.parent)) === machine
+        && (name === id || (suffix && name === id.slice(0, 31 - suffix.length) + suffix)))?.[2];
+    } else return true;
+    if (blocked === true) waiting.add(t.address);
+    if (blocked === undefined) hidden.add(t.address);
+    return blocked !== undefined;
+  });
+  return { hidden, waiting, visible: visible.map(t => waiting.has(t.address) ? { ...t, coordinatorBlocked: true } : t) };
+}
 const SORTS = [
   { id: "priority", label: "Priority", icon: "clock" },
   { id: "grouped", label: "Grouped by space", icon: "layers" },
@@ -221,10 +267,11 @@ export default class Agents extends View {
     if (props()?.sortMenu) return this.sortMenu(t);
     const collapsed = narrow();
     const sort = sortOf();
-    let list = agents();
+    const terminalsNow = terminals();
+    this.migratePins(terminalsNow);
+    const { hidden, waiting, visible: all } = coordinatorView(terminalsNow);
+    let list = agents().filter(a => !hidden.has(a.address)).map(a => waiting.has(a.address) ? { ...a, status: "blocked" } : a);
     this.listed = new Map(list.map((a) => [a.address, a.status]));
-    const all = terminals();
-    this.migratePins(all);
     const shown = focused()?.agent;
     const now = Date.now();
     this.track(list, now);
