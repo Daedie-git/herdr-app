@@ -1,6 +1,6 @@
 //! Builds libghostty-vt from vendor/ghostty with Zig and generates bindings from its headers.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 // Zig builds for the machine it runs on unless told otherwise: its CPU's
@@ -15,6 +15,31 @@ fn zig_target(target: &str) -> &'static str {
         "aarch64-pc-windows-msvc" => "aarch64-windows-msvc",
         other => panic!("ghostty-sys: no Zig target for {other}"),
     }
+}
+
+// Zig 0.16's ELF linker corrupts the compiler_rt it bundles into the archive: repackaging
+// LLVM's object, it writes relocations against undefined section symbols (ld.lld:
+// "undefined symbol: " referenced by compiler_rt.o, e.g. from `cos`). Which functions it
+// breaks depends on the length of paths in the debug info, so the same commit links on one
+// machine and fails on another. LLVM's object, left beside it in Zig's cache as
+// compiler_rt_zcu.o, defines the same symbols and is sound, so the archive gets that instead.
+fn replace_compiler_rt(zig: &str, archive: &Path) {
+    let ar = |args: &[&std::ffi::OsStr]| {
+        let output = Command::new(zig).arg("ar").args(args).output().expect("zig ar");
+        assert!(output.status.success(), "zig ar {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let members = ar(&["t".as_ref(), archive.as_ref()]);
+    let Some(member) = members.lines().find(|m| m.ends_with("/compiler_rt.o")) else {
+        return;
+    };
+    let sound = Path::new(member).with_file_name("compiler_rt_zcu.o");
+    if !sound.exists() {
+        println!("cargo:warning=ghostty-sys: {} is missing; keeping Zig's compiler_rt.o", sound.display());
+        return;
+    }
+    ar(&["d".as_ref(), archive.as_ref(), member.as_ref()]);
+    ar(&["qs".as_ref(), archive.as_ref(), sound.as_ref()]);
 }
 
 fn main() {
@@ -53,6 +78,9 @@ fn main() {
         std::fs::copy(out.join("zig-out/lib/ghostty-vt-static.lib"), lib.join("ghostty-vt.lib")).unwrap();
     } else {
         std::fs::copy(out.join("zig-out/lib/libghostty-vt.a"), lib.join("libghostty-vt.a")).unwrap();
+        if !matches!(std::env::var("CARGO_CFG_TARGET_VENDOR").as_deref(), Ok("apple")) {
+            replace_compiler_rt(&zig, &lib.join("libghostty-vt.a"));
+        }
     }
     println!("cargo:rustc-link-search=native={}", lib.display());
     println!("cargo:rustc-link-lib=static=ghostty-vt");
